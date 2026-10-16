@@ -331,3 +331,4 @@ body.watching #view { padding-bottom: 24px; }
 .recent svg.i { color: var(--text-2); }
 .recent span { flex: 1; }
 @media (min-width: 1000px) { .player:not(:fullscreen) .ctrl-top { display: none; } }
+@media (min-width: 1000px) { .watch-side .feed { display: block; padding: 0; } }

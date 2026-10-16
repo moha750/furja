@@ -1,5 +1,5 @@
 // Network-first for the app's own files (always fresh when online, works offline from cache).
-const CACHE = 'furja-v1';
+const CACHE = 'furja-v2';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './config.js', './manifest.webmanifest',
   './icons/logo.svg', './icons/icon-192.png', './icons/icon-512.png',

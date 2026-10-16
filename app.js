@@ -95,12 +95,19 @@
 
   async function fetchVideos() {
     try {
-      const r = await fetch(`${CFG.url}/rest/v1/videos?select=id,youtube_id,title,channel,channel_avatar,duration_seconds,category,created_at&order=created_at.desc`, {
-        headers: { apikey: CFG.key },
-        cache: 'no-store',
-      });
-      if (!r.ok) throw new Error(r.status);
-      S.videos = await r.json();
+      const STEP = 1000;
+      let all = [];
+      for (let from = 0; ; from += STEP) {
+        const r = await fetch(`${CFG.url}/rest/v1/videos?select=id,youtube_id,title,channel,channel_avatar,duration_seconds,category,created_at,published_at&order=created_at.desc,id.asc`, {
+          headers: { apikey: CFG.key, 'Range-Unit': 'items', Range: `${from}-${from + STEP - 1}` },
+          cache: 'no-store',
+        });
+        if (!r.ok) throw new Error(r.status);
+        const page = await r.json();
+        all = all.concat(page);
+        if (page.length < STEP) break;
+      }
+      S.videos = all;
       S.error = false;
       store.set('cache', S.videos);
     } catch {
@@ -138,7 +145,7 @@
       </div>
       <div class="meta">
         ${avatar(v)}
-        <div class="txt"><h3>${esc(v.title)}</h3><p>${esc(v.channel || '')}${v.channel ? ' • ' : ''}${ago(v.created_at)}</p></div>
+        <div class="txt"><h3>${esc(v.title)}</h3><p>${esc(v.channel || '')}${v.channel ? ' • ' : ''}${ago(v.published_at || v.created_at)}</p></div>
       </div>
     </a>`;
   }
@@ -152,6 +159,52 @@
         ${pct > 2 ? `<div class="wbar"><i style="width:${pct}%"></i></div>` : ''}</div>
       <h3>${esc(v.title)}</h3><p>${esc(v.channel || '')}</p></a>`;
   }
+  // Long lists render in chunks as the user scrolls (a whole channel can be hundreds of videos).
+  const CHUNK = 24;
+  const feedLists = new Map();
+  let feedSeq = 0;
+  function feed(list, style = '') {
+    const id = 'f' + (++feedSeq);
+    if (list.length > CHUNK) feedLists.set(id, { list, n: CHUNK });
+    return `<div class="feed" id="${id}"${style ? ` style="${style}"` : ''}>${list.slice(0, CHUNK).map(card).join('')}</div>${list.length > CHUNK ? `<div class="more" data-for="${id}" style="height:1px"></div>` : ''}`;
+  }
+  const moreObs = 'IntersectionObserver' in window ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const s = e.target, f = feedLists.get(s.dataset.for), box = document.getElementById(s.dataset.for);
+      if (!f || !box) { moreObs.unobserve(s); s.remove(); continue; }
+      box.insertAdjacentHTML('beforeend', f.list.slice(f.n, f.n + CHUNK).map(card).join(''));
+      f.n += CHUNK;
+      if (f.n >= f.list.length) { moreObs.unobserve(s); s.remove(); feedLists.delete(s.dataset.for); }
+      else { moreObs.unobserve(s); moreObs.observe(s); } // re-check if still visible
+    }
+  }, { rootMargin: '1200px 0px' }) : null;
+  function armFeeds() {
+    for (const id of feedLists.keys()) if (!document.getElementById(id)) feedLists.delete(id);
+    document.querySelectorAll('.more[data-for]:not([data-armed])').forEach((s) => {
+      s.dataset.armed = '1';
+      if (moreObs) moreObs.observe(s);
+      else { const f = feedLists.get(s.dataset.for); document.getElementById(s.dataset.for).insertAdjacentHTML('beforeend', f.list.slice(f.n).map(card).join('')); s.remove(); }
+    });
+  }
+  new MutationObserver(() => armFeeds()).observe(view, { childList: true, subtree: true });
+
+  // Home "الكل": alternate between channels so one big channel doesn't fill the whole feed.
+  function mix(list) {
+    const watched = new Set(S.hist.map((h) => h.id));
+    const groups = new Map();
+    for (const v of list) {
+      const k = v.channel || v.youtube_id;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(v);
+    }
+    const qs = [...groups.values()].map((g) => [...g.filter((v) => !watched.has(v.youtube_id)), ...g.filter((v) => watched.has(v.youtube_id))]);
+    const out = [];
+    for (let i = 0; out.length < list.length; i++) for (const q of qs) if (q[i]) out.push(q[i]);
+    return out;
+  }
+  const byPublished = (list) => [...list].sort((a, b) => ((b.published_at || b.created_at) > (a.published_at || a.created_at) ? 1 : -1));
+
   const skeleton = (n = 4) => `<div class="feed">${Array.from({ length: n }, () => `<div class="card sk"><div class="thumb"></div><div class="meta"><div class="av" style="background:var(--skeleton)"></div><div class="txt"><div class="sk-line" style="width:90%"></div><div class="sk-line" style="width:55%"></div></div></div></div>`).join('')}</div>`;
   const empty = (title, sub, icon = 'tv', retry = false) =>
     `<div class="empty">${ic(icon)}<b>${esc(title)}</b>${esc(sub || '')}${retry ? '<br><button class="retry" data-retry>إعادة المحاولة</button>' : ''}</div>`;
@@ -207,9 +260,10 @@
     if (S.chip === 'new') list = list.filter((v) => !watched.has(v.youtube_id));
     else if (S.chip === 'watched') list = list.filter((v) => watched.has(v.youtube_id));
     else if (S.chip !== 'all') list = list.filter((v) => v.category === S.chip);
+    if (S.chip === 'all' || S.chip === 'new') list = mix(list);
 
     view.innerHTML = `<div class="chips">${chips.map(([k, l]) => `<button class="chip ${S.chip === k ? 'on' : ''}" data-chip="${esc(k)}">${esc(l)}</button>`).join('')}</div>
-      <div class="feed">${list.map(card).join('')}</div>`;
+      ${feed(list)}`;
   }
 
   function viewSubs() {
@@ -217,7 +271,7 @@
     if (!S.videos.length) { view.innerHTML = S.loaded ? empty('لا توجد قنوات بعد', '') : skeleton(); return; }
     const ch = channels();
     view.innerHTML = `<div class="subs-row">${ch.map((c) => `<a href="#/channel/${encodeURIComponent(c.name)}">${avatar({ channel: c.name, channel_avatar: c.avatar })}<span>${esc(c.name)}</span></a>`).join('')}</div>
-      <div class="feed">${S.videos.map(card).join('')}</div>`;
+      ${feed(S.videos)}`;
   }
 
   function viewChannel(name) {
@@ -225,7 +279,7 @@
     const list = S.videos.filter((v) => v.channel === name);
     const av = list.find((v) => v.channel_avatar)?.channel_avatar;
     view.innerHTML = `<div class="chan-head">${avatar({ channel: name, channel_avatar: av })}<h2>${esc(name)}</h2><p>${countVideos(list.length)}</p></div>
-      <div class="feed">${list.map(card).join('')}</div>`;
+      ${feed(byPublished(list))}`;
   }
 
   function viewYou() {
@@ -245,7 +299,7 @@
     const titles = { hist: 'السجل', later: 'مشاهدة لاحقًا', liked: 'الفيديوهات التي أعجبتني' };
     const ids = key === 'hist' ? S.hist.map((h) => h.id) : S[key] || [];
     const vids = ids.map(byYid).filter(Boolean);
-    view.innerHTML = `<h1 class="page-title">${titles[key] || ''}</h1>` + (vids.length ? `<div class="feed">${vids.map(card).join('')}</div>` : empty('القائمة فارغة', ''));
+    view.innerHTML = `<h1 class="page-title">${titles[key] || ''}</h1>` + (vids.length ? feed(vids) : empty('القائمة فارغة', ''));
   }
 
   function viewSearch(q) {
@@ -261,7 +315,7 @@
       }
       const words = term.split(/\s+/);
       const res = S.videos.filter((v) => { const hay = normalize(v.title + ' ' + (v.channel || '') + ' ' + (v.category || '')); return words.every((w) => hay.includes(w)); });
-      view.innerHTML = res.length ? `<div class="feed" style="padding-top:8px">${res.map(card).join('')}</div>` : empty('لا توجد نتائج', 'جرّب كلمة أخرى', 'search');
+      view.innerHTML = res.length ? feed(res, 'padding-top:8px') : empty('لا توجد نتائج', 'جرّب كلمة أخرى', 'search');
     };
     input.addEventListener('input', draw);
     $('#sform').addEventListener('submit', (e) => {
@@ -306,14 +360,14 @@
     const chCount = S.videos.filter((x) => x.channel && x.channel === v.channel).length;
     $('#winfo').innerHTML = `<div class="winfo">
         <h1 class="wtitle">${esc(v.title)}</h1>
-        <div class="wsub">${ago(v.created_at)}${v.category ? ' • ' + esc(v.category) : ''}</div>
+        <div class="wsub">${ago(v.published_at || v.created_at)}${v.category ? ' • ' + esc(v.category) : ''}</div>
         ${v.channel ? `<a class="chan-row" href="#/channel/${encodeURIComponent(v.channel)}">${avatar(v)}<div><div class="name">${esc(v.channel)}</div><div class="count">${countVideos(chCount)}</div></div></a>` : '<div style="height:12px"></div>'}
         <div class="actions">
           <button class="pill ${liked ? 'on' : ''}" data-like="${id}">${ic(liked ? 'likeF' : 'like')}<span>${liked ? 'أعجبني' : 'إعجاب'}</span></button>
           <button class="pill ${later ? 'on' : ''}" data-later="${id}">${ic(later ? 'saveF' : 'save')}<span>${later ? 'محفوظ' : 'حفظ'}</span></button>
         </div>
       </div>`;
-    $('#wside').innerHTML = next.length ? `<div class="upnext-title">التالي</div>${next.map(card).join('')}` : '';
+    $('#wside').innerHTML = next.length ? `<div class="upnext-title">التالي</div>${feed(next)}` : '';
     const changed = !Player.v || Player.v.youtube_id !== id;
     Player.open($('#pslot'), v, next[0]);
     if (changed) window.scrollTo(0, 0);

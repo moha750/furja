@@ -38,9 +38,32 @@
     return r.json();
   }
   async function listVideos() {
-    const r = await fetch(`${CFG.url}/rest/v1/videos?select=*&order=created_at.desc`, { headers: { apikey: CFG.key }, cache: 'no-store' });
-    if (!r.ok) throw new Error('network');
-    return r.json();
+    const STEP = 1000;
+    let all = [];
+    for (let from = 0; ; from += STEP) {
+      const r = await fetch(`${CFG.url}/rest/v1/videos?select=*&order=created_at.desc,id.asc`, {
+        headers: { apikey: CFG.key, 'Range-Unit': 'items', Range: `${from}-${from + STEP - 1}` }, cache: 'no-store',
+      });
+      if (!r.ok) throw new Error('network');
+      const page = await r.json();
+      all = all.concat(page);
+      if (page.length < STEP) break;
+    }
+    return all;
+  }
+  async function channelPage(params) {
+    try {
+      const r = await fetch(`${CFG.url}/functions/v1/channel-videos?${params}`, { headers: { apikey: CFG.key } });
+      return await r.json();
+    } catch { return { ok: false, error: 'network' }; }
+  }
+  function agoShort(iso) {
+    if (!iso) return '';
+    const d = (Date.now() - new Date(iso).getTime()) / 864e5;
+    if (d < 1) return 'اليوم';
+    if (d < 30) return `منذ ${Math.floor(d)} يوم`;
+    if (d < 365) return `منذ ${Math.floor(d / 30)} شهر`;
+    return `منذ ${Math.floor(d / 365)} سنة`;
   }
   async function videoInfo(id) {
     try {
@@ -107,7 +130,7 @@
   }
 
   /* ---------- state ---------- */
-  const S = { videos: [], pending: [], filter: '' };
+  const S = { videos: [], pending: [], filter: '', chFilter: '', listN: 60, ch: null };
   const cats = () => [...new Set(S.videos.map((v) => v.category).filter(Boolean))].sort();
 
   /* ---------- views ---------- */
@@ -156,10 +179,22 @@
           <div id="pending"></div>
         </section>
         <section class="box">
+          <h2>إضافة قناة كاملة</h2>
+          <p class="hint">الصق رابط القناة (أو رابط أي فيديو منها). ستظهر كل فيديوهاتها محددة — ألغِ تحديد ما لا تريده ثم أضف الباقي. البثوث المباشرة والـ Shorts لا تُجلب.</p>
+          <input type="text" id="chq" placeholder="https://www.youtube.com/@..." dir="ltr" style="text-align:left">
+          <label for="chcat">التصنيف (اختياري)</label>
+          <input type="text" id="chcat" list="catlist" placeholder="مثال: علوم، قصص، رسوم">
+          <div class="row end" style="margin-top:12px"><button class="btn acc" id="chBtn">جلب فيديوهات القناة</button></div>
+          <div class="msg" id="chm"></div>
+          <div id="chbox"></div>
+        </section>
+        <section class="box">
           <div class="row" style="justify-content:space-between;margin-bottom:12px">
             <h2 style="margin:0">الفيديوهات المعروضة <span class="count" id="cnt"></span></h2>
           </div>
+          <div class="chips" id="chchips" style="position:static;padding:0 0 12px;background:none"></div>
           <input type="search" id="flt" placeholder="ابحث في القائمة">
+          <div id="chrm"></div>
           <div id="list" style="margin-top:8px"></div>
         </section>
         <section class="box">
@@ -173,7 +208,9 @@
       </div>`;
     $('#out').onclick = () => { clearPass(); loginView(); };
     $('#fetchBtn').onclick = onFetch;
-    $('#flt').oninput = (e) => { S.filter = e.target.value.trim(); drawList(); };
+    $('#chBtn').onclick = onChannel;
+    $('#chq').addEventListener('keydown', (e) => { if (e.key === 'Enter') onChannel(); });
+    $('#flt').oninput = (e) => { S.filter = e.target.value.trim(); S.listN = 60; drawList(); };
     $('#pf').addEventListener('submit', async (e) => {
       e.preventDefault();
       const n = $('#np').value.trim(), m = $('#pm');
@@ -189,9 +226,17 @@
 
   function drawList() {
     const f = S.filter.toLowerCase();
-    const vids = S.videos.filter((v) => !f || (v.title + ' ' + (v.channel || '') + ' ' + (v.category || '')).toLowerCase().includes(f));
+    const chs = {};
+    for (const v of S.videos) if (v.channel) chs[v.channel] = (chs[v.channel] || 0) + 1;
+    if (S.chFilter && !chs[S.chFilter]) S.chFilter = '';
+    const names = Object.keys(chs).sort((a, b) => chs[b] - chs[a]);
+    $('#chchips').innerHTML = names.length > 1 ? [['', 'الكل']].concat(names.map((n) => [n, `${n} (${chs[n]})`]))
+      .map(([k, l]) => `<button class="chip ${S.chFilter === k ? 'on' : ''}" data-act="chf" data-ch="${esc(k)}">${esc(l)}</button>`).join('') : '';
+    $('#chrm').innerHTML = S.chFilter ? `<div class="row end" style="margin-top:10px"><button class="btn soft sm" data-act="rmch">إزالة كل فيديوهات «${esc(S.chFilter)}» (${chs[S.chFilter]})</button></div>` : '';
+    const all = S.videos.filter((v) => (!S.chFilter || v.channel === S.chFilter) && (!f || (v.title + ' ' + (v.channel || '') + ' ' + (v.category || '')).toLowerCase().includes(f)));
+    const vids = all.slice(0, S.listN);
     $('#cnt').textContent = `(${S.videos.length})`;
-    $('#list').innerHTML = vids.length ? vids.map((v) => `
+    $('#list').innerHTML = (vids.length ? vids.map((v) => `
       <div class="item" data-vid="${v.id}">
         <div class="th"><img src="https://i.ytimg.com/vi/${v.youtube_id}/mqdefault.jpg" alt="" loading="lazy">${v.duration_seconds ? `<span class="dur">${fmtTime(v.duration_seconds)}</span>` : ''}</div>
         <div class="body">
@@ -208,7 +253,103 @@
             <button class="btn soft sm" data-act="remove">إزالة</button>
           </div>
         </div>
-      </div>`).join('') : `<p class="hint" style="margin:12px 0 0">${S.videos.length ? 'لا نتائج' : 'لم تُضف أي فيديوهات بعد'}</p>`;
+      </div>`).join('') : `<p class="hint" style="margin:12px 0 0">${S.videos.length ? 'لا نتائج' : 'لم تُضف أي فيديوهات بعد'}</p>`)
+      + (all.length > vids.length ? `<div class="row" style="justify-content:center;margin-top:12px"><button class="btn soft" data-act="more">عرض المزيد (${all.length - vids.length})</button></div>` : '');
+  }
+
+  /* ---------- whole-channel import ---------- */
+  function drawChannel() {
+    const box = $('#chbox'), c = S.ch;
+    if (!c) { box.innerHTML = ''; return; }
+    const focused = document.activeElement && document.activeElement.id === 'chf' ? document.activeElement.selectionStart : null;
+    const have = new Set(S.videos.map((v) => v.youtube_id));
+    const f = (c.filter || '').toLowerCase();
+    const shown = c.videos.filter((v) => !f || v.title.toLowerCase().includes(f));
+    const sel = c.videos.filter((v) => c.sel.has(v.id) && !have.has(v.id)).length;
+    const status = c.loading ? `جارٍ الجلب… ${c.videos.length} فيديو حتى الآن` : `${c.videos.length} فيديو${c.capped ? ' (أول 3000 فقط)' : ''}`;
+    box.innerHTML = `
+      <div class="item" style="align-items:center;margin-top:12px">
+        ${c.channel.avatar ? `<img src="${esc(c.channel.avatar)}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover" referrerpolicy="no-referrer">` : ''}
+        <div class="body"><div class="ttl">${esc(c.channel.title)}</div><div class="sub" style="margin:0">${status}</div></div>
+      </div>
+      <input type="search" id="chf" placeholder="ابحث في فيديوهات القناة" value="${esc(c.filter || '')}">
+      <div class="row" style="margin:10px 0">
+        <button class="btn soft sm" data-act="ch-all">تحديد الكل</button>
+        <button class="btn soft sm" data-act="ch-none">إلغاء الكل</button>
+        <div style="flex:1"></div>
+        ${c.loading ? `<button class="btn soft sm" data-act="ch-stop">إيقاف الجلب</button>` : ''}
+        <button class="btn acc" data-act="ch-add" ${sel && !c.adding ? '' : 'disabled'}>${c.adding ? 'جارٍ الإضافة…' : `إضافة المحدد (${sel})`}</button>
+      </div>
+      <div id="chlist">${shown.slice(0, c.n).map((v) => {
+        const exists = have.has(v.id);
+        return `<label class="item" style="cursor:pointer;align-items:center">
+          <input type="checkbox" data-cid="${v.id}" ${exists ? 'disabled checked' : c.sel.has(v.id) ? 'checked' : ''} style="width:20px;height:20px;flex:none;accent-color:var(--accent)">
+          <div class="th" style="width:112px"><img src="https://i.ytimg.com/vi/${v.id}/mqdefault.jpg" alt="" loading="lazy">${v.duration ? `<span class="dur">${fmtTime(v.duration)}</span>` : ''}</div>
+          <div class="body"><div class="ttl">${esc(v.title)}</div><div class="sub" style="margin:0">${exists ? '<span class="tag">موجود</span>' : agoShort(v.published_at)}</div></div>
+        </label>`;
+      }).join('')}</div>
+      ${shown.length > c.n ? `<div class="row" style="justify-content:center;margin-top:12px"><button class="btn soft" data-act="ch-more">عرض المزيد (${shown.length - c.n})</button></div>` : ''}`;
+    const chf = $('#chf');
+    if (focused != null) { chf.focus(); chf.setSelectionRange(focused, focused); }
+    chf.oninput = () => { c.filter = chf.value; c.n = 100; drawChannel(); };
+  }
+
+  async function onChannel() {
+    const q = $('#chq').value.trim(), m = $('#chm');
+    if (!q) return;
+    if (S.ch && S.ch.loading) S.ch.stop = true;
+    m.className = 'msg'; m.textContent = 'جارٍ البحث عن القناة…';
+    const first = await channelPage('q=' + encodeURIComponent(q));
+    if (!first.ok) {
+      m.className = 'msg bad';
+      m.textContent = first.error === 'channel_not_found' ? 'لم أجد القناة — تأكد من الرابط' : ERR.network;
+      return;
+    }
+    m.textContent = '';
+    const c = S.ch = { channel: first.channel, videos: [], sel: new Set(), n: 100, loading: true, stop: false, filter: '', category: $('#chcat').value.trim() };
+    const add = (list) => { for (const v of list) if (!c.videos.some((x) => x.id === v.id)) { c.videos.push(v); c.sel.add(v.id); } };
+    add(first.videos);
+    drawChannel();
+    let next = first.next, fails = 0;
+    while (next && !c.stop && c.videos.length < 3000) {
+      const pg = await channelPage('cursor=' + encodeURIComponent(next));
+      if (S.ch !== c) return;
+      if (!pg.ok) { if (++fails > 2) break; continue; }
+      add(pg.videos); next = pg.next;
+      drawChannel();
+    }
+    c.capped = !!next && c.videos.length >= 3000;
+    c.loading = false;
+    if (S.ch === c) drawChannel();
+  }
+
+  async function addChannelSelected() {
+    const c = S.ch; if (!c) return;
+    const have = new Set(S.videos.map((v) => v.youtube_id));
+    const items = c.videos.filter((v) => c.sel.has(v.id) && !have.has(v.id)); // newest first, as the channel lists them
+    const category = $('#chcat').value.trim();
+    c.adding = true; drawChannel();
+    const m = $('#chm');
+    let added = 0;
+    try {
+      // Send the oldest chunk first so the newest videos end up on top of the feed.
+      const starts = [];
+      for (let i = 0; i < items.length; i += 400) starts.push(i);
+      for (const i of starts.reverse()) {
+        const r = await rpc('admin_add_videos', {
+          p_pass: getPass(), p_items: items.slice(i, i + 400).map((v) => ({ id: v.id, title: v.title, duration: v.duration, published_at: v.published_at })),
+          p_channel: c.channel.title, p_channel_id: c.channel.id, p_channel_url: c.channel.url, p_channel_avatar: c.channel.avatar, p_category: category || null,
+        });
+        if (!r.ok) { if (r.error === 'bad') { clearPass(); return loginView(ERR.bad); } throw new Error(r.error); }
+        added += r.added;
+        m.className = 'msg'; m.textContent = `أُضيف ${added} من ${items.length}…`;
+      }
+      m.className = 'msg ok'; m.textContent = `✓ أُضيف ${added} فيديو من «${c.channel.title}»`;
+    } catch (e) {
+      m.className = 'msg bad'; m.textContent = (ERR[e.message] || ERR.network) + (added ? ` — أُضيف ${added} قبل التوقف` : '');
+    }
+    c.adding = false;
+    await reload(); drawChannel();
   }
 
   function drawPending() {
@@ -306,6 +447,27 @@
     if (!b) return;
     const act = b.dataset.act;
     if (act === 'preview') return openPreview(b.dataset.yid);
+    if (act === 'chf') { S.chFilter = b.dataset.ch; S.listN = 60; return drawList(); }
+    if (act === 'more') { S.listN += 100; return drawList(); }
+    if (act === 'rmch') {
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'تأكيد إزالة القناة كاملة؟'; b.className = 'btn danger sm'; return; }
+      b.disabled = true;
+      try {
+        const r = await rpc('admin_remove_channel', { p_pass: getPass(), p_channel: S.chFilter });
+        if (!r.ok && r.error === 'bad') { clearPass(); return loginView(ERR.bad); }
+      } catch { /* ignore */ }
+      S.chFilter = '';
+      await reload(); drawChannel();
+      return;
+    }
+    if (S.ch) {
+      const c = S.ch;
+      if (act === 'ch-all') { c.videos.forEach((v) => c.sel.add(v.id)); return drawChannel(); }
+      if (act === 'ch-none') { c.sel.clear(); return drawChannel(); }
+      if (act === 'ch-more') { c.n += 100; return drawChannel(); }
+      if (act === 'ch-stop') { c.stop = true; return; }
+      if (act === 'ch-add') return addChannelSelected();
+    }
 
     const pi = b.closest('[data-pi]');
     if (pi) {
@@ -389,6 +551,15 @@
   }
 
   root.addEventListener('click', onClick);
+  root.addEventListener('change', (e) => {
+    const cb = e.target.closest('[data-cid]');
+    if (!cb || !S.ch) return;
+    if (cb.checked) S.ch.sel.add(cb.dataset.cid); else S.ch.sel.delete(cb.dataset.cid);
+    const have = new Set(S.videos.map((v) => v.youtube_id));
+    const n = S.ch.videos.filter((v) => S.ch.sel.has(v.id) && !have.has(v.id)).length;
+    const btn = document.querySelector('[data-act="ch-add"]');
+    if (btn && !S.ch.adding) { btn.textContent = `إضافة المحدد (${n})`; btn.disabled = !n; }
+  });
   boot();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('../sw.js', { scope: '../' }).catch(() => {});
 })();
